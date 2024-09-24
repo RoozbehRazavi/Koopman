@@ -27,9 +27,13 @@ def setup_directory(dir_path):
 setup_directory('./logs13_mapping_epoch_2_b_128')
 writer = SummaryWriter(log_dir="./logs13_mapping_epoch_2_b_128")
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 warnings.filterwarnings("ignore")
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+
 
 class KoopmanMapping(nn.Module):
     def __init__(self, obs_dim, hidden_dim, embedding_dim) -> None:
@@ -471,3 +475,104 @@ class KoopmanLQR(nn.Module):
         but that would require a same dimensionality
         '''
         return torch.matmul(G, self._g_affine.transpose(0, 1))+torch.matmul(U, self._u_affine.transpose(0, 1))
+
+def eval_lqr(env, koopman_mapping, koopman_operator, cost_learning, num_episodes=10):
+
+
+def main():
+    EPOCH = 1000
+    EPISODE_COUNT_TRANING = 1000
+    KOOPMAN_MAPPING_FRE = 32
+    KOOPMAN_MAPPING_EPOCH = 2
+    KOOPMAN_MAPPING_BATCH_SIZE = 128
+
+    RNN_HIDDEN_DIM = 256
+    OBS_EMBEDDING_DIM = 64
+    KOOPMAN_DIM = 64
+    BATCH_SIZE = 64
+    LEN_PRED = 2
+
+    EVAL_INTERVAL = 10 
+
+
+    env = dmc2gym.make(
+            domain_name="cartpole",
+            task_name='swingup',
+            seed=1,
+            visualize_reward=False,
+            from_pixels='pixel',
+            height=64,
+            width=64,
+            frame_skip=1)
+    env = NormalizeObservation(env)
+    env = FixLenWrapper(env)
+
+    buffer = TrajectoryBuffer(buffer_size=EPISODE_COUNT_TRANING)
+
+    for i in range(EPISODE_COUNT_TRANING):
+        states, actions, rewards, next_states = [], [], [], []
+        state = env.reset()
+        done = False
+        while done is False:
+            action = env.action_space.sample()
+            next_state, reward, done, _ = env.step(action)
+            states.append(state)
+            actions.append(action)
+            rewards.append(reward)
+            next_states.append(next_state)
+            state = next_state
+    
+    koopman_mapping = KoopmanMapping(64, 256, 64)
+    koopman_operator = KoopamnOperator(64, 1)
+    cost_learning = CostLearning(64, 1)
+
+    koopman_mapping_optimizer = torch.optim.Adam(koopman_mapping.parameters(), lr=1e-3)
+    koopman_operator_optimizer = torch.optim.Adam(koopman_operator.parameters(), lr=1e-3)  
+    cost_learning_optimizer = torch.optim.Adam(cost_learning.parameters(), lr=1e-3)
+
+    for i in range(EPOCH):
+        if i % KOOPMAN_MAPPING_FRE == 0:
+            for j in range(KOOPMAN_MAPPING_EPOCH):
+                states, actions, rewards, next_states = buffer.sample_batch(KOOPMAN_MAPPING_BATCH_SIZE)
+                states = torch.tensor(states, dtype=torch.float32).to(device)
+                actions = torch.tensor(actions, dtype=torch.float32).to(device)
+                rewards = torch.tensor(rewards, dtype=torch.float32).to(device)
+                next_states = torch.tensor(next_states, dtype=torch.float32).to(device)
+                koopman_mapping_loss, flag = koopman_mapping.loss_function1(koopman_operator.A.clone().detach(),
+                                                            koopman_operator.B.clone().detach(),
+                                                            states, actions, LEN_PRED)
+                if flag:
+                    koopman_mapping_optimizer.zero_grad()
+                    koopman_mapping_loss.backward()
+                    koopman_mapping_optimizer.step()
+
+        states, actions, rewards, next_states = buffer.sample_batch(BATCH_SIZE)
+        states = torch.tensor(states, dtype=torch.float32).to(device)
+        actions = torch.tensor(actions, dtype=torch.float32).to(device)
+        rewards = torch.tensor(rewards, dtype=torch.float32).to(device)
+        next_states = torch.tensor(next_states, dtype=torch.float32).to(device)
+
+        with torch.no_grad():
+            states = koopman_mapping(states)
+            next_states = koopman_mapping(next_states)
+            
+        koopman_operator_loss = koopman_operator.loss_function(states, actions, next_states)
+        cost_learning_loss = cost_learning.loss_function(states, actions, rewards)
+
+        koopman_operator_optimizer.zero_grad()
+        cost_learning_optimizer.zero_grad()
+
+        koopman_operator_loss.backward()
+        cost_learning_loss.backward()
+
+        koopman_operator_optimizer.step()
+        cost_learning_optimizer.step()
+
+    if i 
+    writer.add_scalar('Loss/koopman_mapping', koopman_mapping_loss, i)
+    writer.add_scalar('Loss/koopman_operator', koopman_operator_loss, i)
+    writer.add_scalar('Loss/cost_learning', cost_learning_loss, i)
+
+
+
+    
