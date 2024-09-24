@@ -1,0 +1,17 @@
+# Ignore save and log directories
+saved/
+log/
+lib/
+tmp/
+
+# Ignore any hidden files in these directories
+saved/**
+log/**
+lib/**
+tmp/**
+
+# Ignore files with specific extensions (optional)
+saved/*.log
+log/*.log
+lib/*.log\
+tmp/*.log
