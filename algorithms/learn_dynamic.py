@@ -18,22 +18,18 @@ if torch.cuda.is_available():
     torch.set_default_tensor_type(torch.cuda.FloatTensor)
 import os 
 import shutil
-
-def setup_directory(dir_path):
-    if os.path.exists(dir_path):
-        shutil.rmtree(dir_path)
-    os.makedirs(dir_path)
-
-setup_directory('./logs13_mapping_epoch_2_b_128')
-writer = SummaryWriter(log_dir="./logs13_mapping_epoch_2_b_128")
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
+import time
 warnings.filterwarnings("ignore")
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
+TAU = 0.02
 
+# TODO fix this part!
+def setup_directory(dir_path):
+    if os.path.exists(dir_path):
+        shutil.rmtree(dir_path)
+    os.makedirs(dir_path)
 
 class KoopmanMapping(nn.Module):
     def __init__(self, obs_dim, hidden_dim, embedding_dim) -> None:
@@ -47,10 +43,10 @@ class KoopmanMapping(nn.Module):
             nn.ReLU(),
             nn.Conv2d(in_channels=32, out_channels=64, kernel_size=4, stride=2, padding=1),
             nn.ReLU(),
-            nn.Conv2d(in_channels=64, out_channels=64, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(in_channels=64, out_channels=64, kernel_size=3, stride=1, padding=0),
             nn.ReLU(),
             nn.Flatten(),
-            nn.Linear(64 * 8 * 8, obs_dim)
+            nn.Linear(64 * 6 * 6, obs_dim)
         )
         # Define an RNN for processing sequences (trajectories)
         self.rnn = nn.GRU(input_size=obs_dim, hidden_size=hidden_dim, batch_first=True)
@@ -83,21 +79,22 @@ class KoopmanMapping(nn.Module):
         Returns:
             Embedding of the anchor (last hidden state of RNN)
         """
+        # TODO should all rnn and encoder train with pos. and neg. samples?
         #hidden_state = hidden_state.squeeze(0)  # Remove extra dimension, result is (N, hidden_dim)
         B = trajectories.shape[0]  # Batch size
         T = trajectories.shape[1]  # Time steps
         trajectories = trajectories.reshape((-1, trajectories.shape[-3], trajectories.shape[-2], trajectories.shape[-1]))
         trajectories = self.image_encoder(trajectories).reshape((B, T, -1))
         if h_0 is None:
-            # Pass the trajectories through the RNN
-            hidden_state, h_n = self.rnn(trajectories)  # hidden_state: (1, N, hidden_dim)
+            h_0 = torch.zeros(1, B, self.hidden_dim).to(trajectories.device)  # Initial hidden state
+            hidden_state, h_n = self.rnn(trajectories, h_0)  # hidden_state: (1, N, hidden_dim)
         else:
             hidden_state, h_n = self.rnn(trajectories, h_0)
+        
         # Pass hidden state through anchor embedding head
         if anchor:
             z_anchor = self.anchor_emebedding_head(hidden_state)  # (N x embedding_dim)
         else:
-            
             z_anchor = self.pos_neg_embedding_head(hidden_state)
         return z_anchor, h_n
 
@@ -137,7 +134,6 @@ class KoopmanMapping(nn.Module):
         # result = result * mask
         if torch.isnan(result).any() or torch.isinf(result).any():
             pass 
-            #breakpoint()
             print('Nan or Inf')
         return result
 
@@ -170,15 +166,17 @@ class KoopmanMapping(nn.Module):
             for m in range(0, LEN_PRED):
                 action = actions[:, n, :]#.unsqueeze(1)
                 if m == 0:
+                    z_future[:, n, m] = z_t[:, n, :]
                     z_t_ = z_t[:, n, :]#.unsqueeze(-1)
-                    temp = torch.matmul(z_t_, A.transpose(0, 1)).unsqueeze(-1) #A.unsqueeze(0) @ z_t_ 
-                    temp1 = B.unsqueeze(0) * action.unsqueeze(1)
-                    temp = temp + temp1
-                    z_future[:, n, m] = temp.squeeze(-1)
+                    state_effect = torch.matmul(z_t_, A.transpose(0, 1)).unsqueeze(-1) #A.unsqueeze(0) @ z_t_ 
+                    action_effect = B.unsqueeze(0) * action.unsqueeze(1)
+                    effect = state_effect + action_effect
+                    z_future[:, n, m] += TAU * effect.squeeze(-1)
                 else:
+                    z_future[:, n, m] = z_future[:, n, m-1]
                     torch.matmul(z_future[:, n, m-1, :], A.transpose(0, 1)).unsqueeze(-1)
-                    temp = torch.matmul(z_future[:, n, m-1, :], A.transpose(0, 1)).unsqueeze(-1) + B.unsqueeze(0) * action.unsqueeze(1)
-                    z_future[:, n, m] = temp.squeeze(-1)
+                    effect = torch.matmul(z_future[:, n, m-1, :], A.transpose(0, 1)).unsqueeze(-1) + B.unsqueeze(0) * action.unsqueeze(1)
+                    z_future[:, n, m] += TAU * effect.squeeze(-1)
 
         # Pass positive samples through the RNN and get embeddings
         z_positive, h_n = self(states, anchor=False)  # (1 x N x hidden_dim)
@@ -218,7 +216,7 @@ class KoopmanMapping(nn.Module):
         print('Nan: ', nan_counter, ' Inf: ', inf_counter)
         if loss == 0:
             return loss, False
-        return loss, True
+        return loss/counter, True
 
     # def update_momentum_encoder(self, momentum=0.999):
     #     # Update the momentum encoder (positive/negative embedding head) using EMA of anchor embedding head
@@ -241,16 +239,11 @@ class KoopamnOperator(nn.Module):
         torch.nn.init.normal_(self.B, mean=0, std=1)
 
     def forward(self, states, actions):
-        result = torch.matmul(states, self.A.transpose(0, 1))+torch.matmul(actions, self.B.transpose(0, 1))
+        result = states + TAU * torch.matmul(states, self.A.transpose(0, 1))+torch.matmul(actions, self.B.transpose(0, 1))
         return result
     
-
     def loss_function(self, states, actions, next_states):
-        return nn.MSELoss()(self(states, actions), next_states)#.mean()
-        # result = self(states, actions)
-        # result = result - next_states
-        # result =  (result ** 2).mean()
-        # return result
+        return nn.MSELoss()(self(states, actions), next_states).mean()
 
 
 class CostLearning(nn.Module):
@@ -260,8 +253,8 @@ class CostLearning(nn.Module):
         self._q_diag_log = nn.Parameter(torch.zeros(state_dim))  # to use: Q = diag(_q_diag_log.exp())
         self._r_diag_log = nn.Parameter(torch.zeros(action_dim)) # gain of control penalty, in theory need to be parameterized...
 
-        torch.nn.init.normal_(self._q_diag_log, mean=0, std=.1)
-        torch.nn.init.normal_(self._r_diag_log, mean=0, std=.1)
+        # torch.nn.init.normal_(self._q_diag_log, mean=0, std=1)
+        # torch.nn.init.normal_(self._r_diag_log, mean=0, std=1)
     
     def forward(self, states, actions):
         B, T, d = states.shape
@@ -307,28 +300,28 @@ class TrajectoryBuffer:
 
 
 class FixLenWrapper(gym.Wrapper):
-    def __init__(self, env: gym.Env):
+    def __init__(self, env: gym.Env, max_steps=100):
         super().__init__(env)
         self.step_count = 0
-        assert self.env._max_episode_steps
+        self.env._max_episode_steps = max_steps
     
     def reset(self, **kwargs):
         result =  super().reset(**kwargs)
         self.step_count = 0
+        return result
     
     def step(self, action):
-        state, reward, truncated, terminated, info =  super().step(action)
-        done = terminated or truncated
+        state, reward, done, info =  super().step(action)
         
-        if self.step_count >= self.env._max_episode_steps:
-            terminated = done
+        if self.step_count == self.env._max_episode_steps - 1:
+            done = True
         else:
             self.step_count += 1
             done = False
-        return state, reward, done, done, info
+        return state, reward, done, info
 
 class KoopmanLQR(nn.Module):
-    def __init__(self, k, T, g_dim, u_dim, g_goal=None, u_affine=None):
+    def __init__(self, A, B, q_diag_log, r_diag_log, koopman_dim, horizen, action_dim, g_goal=None):
         """
         k:          rank of approximated koopman operator
         T:          length of horizon
@@ -339,29 +332,19 @@ class KoopmanLQR(nn.Module):
         u_affine:   should be a linear transform for an augmented observation phi(x, u) = phi(x) + nn.Linear(u)
         """
         super().__init__()
-        self._k = k
-        self._T = T
-        self._g_dim = g_dim
-        self._u_dim = u_dim
+        self._k = koopman_dim
+        self._T = horizen
+        self._u_dim = action_dim
         self._g_goal = g_goal
-        self._u_affine = u_affine
         
         # prepare linear system params
-        self._g_affine = nn.Parameter(torch.empty((k, k)))
-        
-        if self._u_affine is None:
-            self._u_affine = nn.Parameter(torch.empty((k, u_dim)))
-        else:
-            self._u_affine = nn.Parameter(self._u_affine)
-        
-        # try to avoid degenerated case, can it be fixed with initialization?
-        torch.nn.init.normal_(self._g_affine, mean=0, std=1)
-        torch.nn.init.normal_(self._u_affine, mean=0, std=1)
+        self._g_affine = A
+
+        self._u_affine = B
 
         # parameters of quadratic functions
-        self._q_diag_log = nn.Parameter(torch.zeros(self._k))  # to use: Q = diag(_q_diag_log.exp())
-        self._r_diag_log = nn.Parameter(torch.zeros(self._u_dim)) # gain of control penalty, in theory need to be parameterized...
-        self._r_diag_log.requires_grad = False
+        self._q_diag_log = q_diag_log
+        self._r_diag_log = r_diag_log 
 
         # zero tensor constant for k and v in the case of fixed origin
         # these will be automatically moved to gpu so no need to create and check in the forward process
@@ -377,10 +360,9 @@ class KoopmanLQR(nn.Module):
         '''
         perform mpc with current parameters given the initial x0
         '''
-        breakpoint()
         K, k, V, v = self._retrieve_riccati_solution()
         u = -self._batch_mv(K[0], g0) + k[0]  # apply the first control as mpc
-        return u
+        return torch.clamp(u, -1, 1)
     
     @staticmethod
     def _batch_mv(bmat, bvec):
@@ -437,7 +419,6 @@ class KoopmanLQR(nn.Module):
         B_trans = B.transpose(-2,-1)
 
         V[-1] = Q  # initialization for backpropagation
-        breakpoint()
         if goals is not None:
             v[-1] = self._batch_mv(Q, goals[:, -1, :])
             for i in reversed(range(T)):
@@ -468,32 +449,100 @@ class KoopmanLQR(nn.Module):
         # note K is for negative feedback, namely u = -Kx+k
         return K, k, V, v
 
-    def _predict_koopman(self, G, U):
-        '''
-        predict dynamics with current koopman parameters
-        note both input and return are embeddings of the predicted state, we can recover that by using invertible net, e.g. normalizing-flow models
-        but that would require a same dimensionality
-        '''
-        return torch.matmul(G, self._g_affine.transpose(0, 1))+torch.matmul(U, self._u_affine.transpose(0, 1))
+def log_weights(koopman_mapping:KoopmanMapping, koopman_operator:KoopamnOperator, cost_learning: CostLearning, epoch: int, writer: SummaryWriter):
+    
+    for name, param in koopman_mapping.named_parameters():
+        writer.add_scalar(f'Weights/{name}', param.norm(), epoch)
+        if param.grad is not None:
+            writer.add_scalar(f'Gradients/{name}', param.grad.norm(), epoch)
+    
+    for name, param in koopman_operator.named_parameters():
+        writer.add_scalar(f'Weights/{name}', param.norm(), epoch)
+        if param.grad is not None:
+            writer.add_scalar(f'Gradients/{name}', param.grad.norm(), epoch)
 
-def eval_lqr(env, koopman_mapping, koopman_operator, cost_learning, num_episodes=10):
+    for name, param in cost_learning.named_parameters():
+        writer.add_scalar(f'Weights/{name}', param.norm(), epoch)
+        if param.grad is not None:
+            writer.add_scalar(f'Gradients/{name}', param.grad.norm(), epoch)
+
+def eval_lqr(env, koopman_mapping, koopman_operator, cost_learning, koopman_dim, writer, device, horizen=10, num_episodes=100, gamma=0.99):
+    controller =KoopmanLQR(A=koopman_operator.A,
+                B=koopman_operator.B,
+                q_diag_log=cost_learning._q_diag_log,
+                r_diag_log=cost_learning._r_diag_log,
+                koopman_dim=koopman_dim, horizen=horizen, action_dim=1)
+    values1 = []
+    for i in range(num_episodes):
+        state = env.reset()
+        done = False
+        hidden_state = None
+        ret = 0
+        while done is False:
+            state = torch.tensor(state, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
+            with torch.no_grad():
+                state, hidden_state = koopman_mapping(state, h_0=hidden_state)
+                action = controller(state[0]).detach().cpu().numpy()[0]
+            state, reward, done, _ = env.step(action)
+            ret = ret * gamma + reward
+        values1.append(ret)
+    writer.add_scalar('Evaluation/mean_return', np.mean(values1), i)
+    writer.add_scalar('Evaluation/std_return', np.std(values1), i)
+
+    controller_transpose = KoopmanLQR(A=koopman_operator.A.transpose(0, 1),
+                            B=koopman_operator.B,
+                            q_diag_log=cost_learning._q_diag_log,
+                            r_diag_log=cost_learning._r_diag_log,
+                            koopman_dim=koopman_dim, horizen=horizen, action_dim=1)
+    values2 = []
+    for i in range(num_episodes):
+        state = env.reset()
+        done = False
+        hidden_state = None
+        ret = 0
+        while done is False:
+            state = torch.tensor(state, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
+            with torch.no_grad():
+                state, hidden_state = koopman_mapping(state, h_0=hidden_state)
+                action = controller_transpose(state[0]).detach().cpu().numpy()[0]
+            state, reward, done, _ = env.step(action)
+            ret = ret * gamma + reward
+        values2.append(ret)
+    writer.add_scalar('Evaluation/mean_return_transpose', np.mean(values2), i)
+    writer.add_scalar('Evaluation/std_return_transpose', np.std(values2), i)
+
+    return np.mean(values1), np.mean(values2) 
 
 
 def main():
     EPOCH = 1000
-    EPISODE_COUNT_TRANING = 1000
+    EPISODE_COUNT_TRANING = 100
     KOOPMAN_MAPPING_FRE = 32
     KOOPMAN_MAPPING_EPOCH = 2
-    KOOPMAN_MAPPING_BATCH_SIZE = 128
+    KOOPMAN_MAPPING_BATCH_SIZE = 64
 
     RNN_HIDDEN_DIM = 256
     OBS_EMBEDDING_DIM = 64
     KOOPMAN_DIM = 64
-    BATCH_SIZE = 64
-    LEN_PRED = 2
+    BATCH_SIZE = 32
+    LEN_PRED = 1
 
-    EVAL_INTERVAL = 10 
+    # TODO 
+    EVAL_INTERVAL = 5
+    SAVE_INTERVAL = 100
+    LOAD=False
+    
+    start_time = time.strftime("%Y-%m-%d_%H-%M-%S")
+    run_id = f"len{LEN_PRED}_{start_time}"
 
+    save_dir = f'./saved/{run_id}'
+    logdir = F'./log/{run_id}'
+
+    setup_directory(save_dir)
+    
+    writer = SummaryWriter(log_dir=logdir)
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     env = dmc2gym.make(
             domain_name="cartpole",
@@ -504,27 +553,46 @@ def main():
             height=64,
             width=64,
             frame_skip=1)
+    
     env = NormalizeObservation(env)
+    
     env = FixLenWrapper(env)
 
     buffer = TrajectoryBuffer(buffer_size=EPISODE_COUNT_TRANING)
 
-    for i in range(EPISODE_COUNT_TRANING):
-        states, actions, rewards, next_states = [], [], [], []
-        state = env.reset()
-        done = False
-        while done is False:
-            action = env.action_space.sample()
-            next_state, reward, done, _ = env.step(action)
-            states.append(state)
-            actions.append(action)
-            rewards.append(reward)
-            next_states.append(next_state)
-            state = next_state
+    if os.path.exists(f'./saved/buffer_{EPISODE_COUNT_TRANING}_random.pkl'):
+        print('Loading buffer')
+        buffer.load(f'./saved/buffer_{EPISODE_COUNT_TRANING}_random.pkl')
+    else:
+        print('Generating buffer')
+        for i in range(EPISODE_COUNT_TRANING):
+            states, actions, rewards, next_states = [], [], [], []
+            state = env.reset()
+            done = False
+            while done is False:
+                action = env.action_space.sample()
+                next_state, reward, done, _ = env.step(action)
+                states.append(state)
+                actions.append(action)
+                rewards.append(reward)
+                next_states.append(next_state)
+                state = next_state
+            buffer.store_trajectory(states, actions, rewards, next_states)
     
-    koopman_mapping = KoopmanMapping(64, 256, 64)
-    koopman_operator = KoopamnOperator(64, 1)
-    cost_learning = CostLearning(64, 1)
+    if not os.path.exists(f'./saved/buffer_{EPISODE_COUNT_TRANING}_random.pkl'):
+        print('Saving buffer')
+        buffer.save(f'./saved/buffer_{EPISODE_COUNT_TRANING}_random.pkl')
+    
+    print('Buffer is Ready!')
+    
+    koopman_mapping = KoopmanMapping(obs_dim=OBS_EMBEDDING_DIM, hidden_dim=RNN_HIDDEN_DIM, embedding_dim=KOOPMAN_DIM).to(device)
+    koopman_operator = KoopamnOperator(state_dim=KOOPMAN_DIM, action_dim=1).to(device)
+    cost_learning = CostLearning(state_dim=KOOPMAN_DIM, action_dim=1).to(device)
+
+    if LOAD:
+        koopman_mapping.load_state_dict(torch.load(f'{save_dir}/koopman_mapping_100'))
+        koopman_operator.load_state_dict(torch.load(f'{save_dir}/koopman_operator_100'))
+        cost_learning.load_state_dict(torch.load(f'{save_dir}/cost_learning_100'))
 
     koopman_mapping_optimizer = torch.optim.Adam(koopman_mapping.parameters(), lr=1e-3)
     koopman_operator_optimizer = torch.optim.Adam(koopman_operator.parameters(), lr=1e-3)  
@@ -533,11 +601,19 @@ def main():
     for i in range(EPOCH):
         if i % KOOPMAN_MAPPING_FRE == 0:
             for j in range(KOOPMAN_MAPPING_EPOCH):
-                states, actions, rewards, next_states = buffer.sample_batch(KOOPMAN_MAPPING_BATCH_SIZE)
-                states = torch.tensor(states, dtype=torch.float32).to(device)
-                actions = torch.tensor(actions, dtype=torch.float32).to(device)
-                rewards = torch.tensor(rewards, dtype=torch.float32).to(device)
-                next_states = torch.tensor(next_states, dtype=torch.float32).to(device)
+                batch = buffer.sample_batch(KOOPMAN_MAPPING_BATCH_SIZE)
+                states = [torch.tensor(x['states'], dtype=torch.float32) for x in batch]
+                states = torch.stack(states, dim=0).to(device)
+                actions = [torch.tensor(x['actions'], dtype=torch.float32) for x in batch]
+                actions = torch.stack(actions, dim=0).to(device)
+                rewards = [torch.tensor(x['rewards'], dtype=torch.float32) for x in batch]
+                rewards = torch.stack(rewards, dim=0).to(device)
+                next_states = [torch.tensor(x['next_states'], dtype=torch.float32) for x in batch]
+                next_states = torch.stack(next_states, dim=0).to(device)
+                # states = torch.tensor([x['states'] for x in batch], dtype=torch.float32).to(device)
+                # actions = torch.tensor([x['actions'] for x in batch], dtype=torch.float32).to(device)
+                # rewards = torch.tensor([x['rewards'] for x in batch], dtype=torch.float32).to(device)
+                # next_states = torch.tensor([x['next_states'] for x in batch], dtype=torch.float32).to(device)
                 koopman_mapping_loss, flag = koopman_mapping.loss_function1(koopman_operator.A.clone().detach(),
                                                             koopman_operator.B.clone().detach(),
                                                             states, actions, LEN_PRED)
@@ -546,15 +622,19 @@ def main():
                     koopman_mapping_loss.backward()
                     koopman_mapping_optimizer.step()
 
-        states, actions, rewards, next_states = buffer.sample_batch(BATCH_SIZE)
-        states = torch.tensor(states, dtype=torch.float32).to(device)
-        actions = torch.tensor(actions, dtype=torch.float32).to(device)
-        rewards = torch.tensor(rewards, dtype=torch.float32).to(device)
-        next_states = torch.tensor(next_states, dtype=torch.float32).to(device)
+        batch = buffer.sample_batch(BATCH_SIZE)
+        states = [torch.tensor(x['states'], dtype=torch.float32) for x in batch]
+        states = torch.stack(states, dim=0).to(device)
+        actions = [torch.tensor(x['actions'], dtype=torch.float32) for x in batch]
+        actions = torch.stack(actions, dim=0).to(device)
+        rewards = [torch.tensor(x['rewards'], dtype=torch.float32) for x in batch]
+        rewards = torch.stack(rewards, dim=0).to(device)
+        next_states = [torch.tensor(x['next_states'], dtype=torch.float32) for x in batch]
+        next_states = torch.stack(next_states, dim=0).to(device)
 
         with torch.no_grad():
-            states = koopman_mapping(states)
-            next_states = koopman_mapping(next_states)
+            states, _ = koopman_mapping(states)
+            next_states, _ = koopman_mapping(next_states)
             
         koopman_operator_loss = koopman_operator.loss_function(states, actions, next_states)
         cost_learning_loss = cost_learning.loss_function(states, actions, rewards)
@@ -568,11 +648,20 @@ def main():
         koopman_operator_optimizer.step()
         cost_learning_optimizer.step()
 
-    if i 
-    writer.add_scalar('Loss/koopman_mapping', koopman_mapping_loss, i)
-    writer.add_scalar('Loss/koopman_operator', koopman_operator_loss, i)
-    writer.add_scalar('Loss/cost_learning', cost_learning_loss, i)
+        if i % EVAL_INTERVAL == 0:
+            values1, values2 = eval_lqr(env, koopman_mapping, koopman_operator, cost_learning, KOOPMAN_DIM, writer, device)
+            log_weights(koopman_mapping, koopman_operator, cost_learning, i, writer)
+            print(f'Epoch: {i}, Mapping Loss: {koopman_mapping_loss.item()}, Operator Loss: {koopman_operator_loss.item()}, Cost Loss: {cost_learning_loss.item()}, Controller: {values1}, Controller_T: {values2}')
+
+        if i % SAVE_INTERVAL == 0:
+            torch.save(koopman_mapping.state_dict(), f'{save_dir}/koopman_mapping_{i}.pt')
+            torch.save(koopman_operator.state_dict(), f'{save_dir}/koopman_operator_{i}.pt')
+            torch.save(cost_learning.state_dict(), f'{save_dir}/cost_learning_{i}.pt')
+
+        writer.add_scalar('Loss/koopman_mapping', koopman_mapping_loss, i)
+        writer.add_scalar('Loss/koopman_operator', koopman_operator_loss, i)
+        writer.add_scalar('Loss/cost_learning', cost_learning_loss, i)
 
 
-
-    
+if __name__ == '__main__':
+    main()
