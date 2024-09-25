@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import dmc2gym
+from gym import spaces
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv
 import gym
@@ -30,6 +31,21 @@ def setup_directory(dir_path):
     if os.path.exists(dir_path):
         shutil.rmtree(dir_path)
     os.makedirs(dir_path)
+
+def tune_action(ppo, action_space, action):
+    # Rescale and perform action
+    clipped_actions = action
+
+    if isinstance(action_space, spaces.Box):
+        if ppo.policy.squash_output:
+            # Unscale the actions to match env bounds
+            # if they were previously squashed (scaled in [-1, 1])
+            clipped_actions = ppo.policy.unscale_action(clipped_actions)
+        else:
+            # Otherwise, clip the actions to avoid out of bound error
+            # as we are sampling from an unbounded Gaussian distribution
+            clipped_actions = np.clip(action, action_space.low, action_space.high)
+    return clipped_actions
 
 class KoopmanMapping(nn.Module):
     def __init__(self, obs_dim, hidden_dim, embedding_dim) -> None:
@@ -300,7 +316,7 @@ class TrajectoryBuffer:
 
 
 class FixLenWrapper(gym.Wrapper):
-    def __init__(self, env: gym.Env, max_steps=100):
+    def __init__(self, env: gym.Env, max_steps: int):
         super().__init__(env)
         self.step_count = 0
         self.env._max_episode_steps = max_steps
@@ -362,7 +378,7 @@ class KoopmanLQR(nn.Module):
         '''
         K, k, V, v = self._retrieve_riccati_solution()
         u = -self._batch_mv(K[0], g0) + k[0]  # apply the first control as mpc
-        return torch.clamp(u, -1, 1)
+        return torch.clip(u, -1, 1)
     
     @staticmethod
     def _batch_mv(bmat, bvec):
@@ -516,7 +532,7 @@ def eval_lqr(env, koopman_mapping, koopman_operator, cost_learning, koopman_dim,
 
 def main():
     EPOCH = 1000
-    EPISODE_COUNT_TRANING = 100
+    EPISODE_COUNT_TRANING = 10000
     KOOPMAN_MAPPING_FRE = 32
     KOOPMAN_MAPPING_EPOCH = 2
     KOOPMAN_MAPPING_BATCH_SIZE = 64
@@ -531,7 +547,17 @@ def main():
     EVAL_INTERVAL = 5
     SAVE_INTERVAL = 100
     LOAD=False
-    
+    EXPERT_POLICY_FRAME  = 1000000
+    PORTION_EXPERT = 0.5
+
+    DATA_TYPE = 'MIX'
+    if PORTION_EXPERT == 0:
+        DATA_TYPE = 'RANDOM'
+    elif PORTION_EXPERT == 1:
+        DATA_TYPE = 'EXPERT'
+    else:
+        DATA_TYPE = 'MIX'
+
     start_time = time.strftime("%Y-%m-%d_%H-%M-%S")
     run_id = f"len{LEN_PRED}_{start_time}"
 
@@ -556,21 +582,42 @@ def main():
     
     env = NormalizeObservation(env)
     
-    env = FixLenWrapper(env)
+    env = FixLenWrapper(env, max_steps=100)
+
+    expert_policy = PPO('CnnPolicy', env=env, verbose=1, device=device)
+
+    if os.path.exists(f'./saved/ppo_expert_policy_{EXPERT_POLICY_FRAME}.zip'):
+        print('Load Exper Policy')
+        expert_policy.load(f'/saved/ppo_expert_policy_{EXPERT_POLICY_FRAME}.zip')
+    else:
+        print('Train Expert Policy')
+        expert_policy.learn(total_timesteps=EXPERT_POLICY_FRAME)
+        expert_policy.save(f'./saved/ppo_expert_policy_{EXPERT_POLICY_FRAME}')
+    
+    print('Expert Policy is Ready!')
 
     buffer = TrajectoryBuffer(buffer_size=EPISODE_COUNT_TRANING)
 
-    if os.path.exists(f'./saved/buffer_{EPISODE_COUNT_TRANING}_random.pkl'):
+    if os.path.exists(f'./saved/buffer_{EPISODE_COUNT_TRANING}_{DATA_TYPE}_{PORTION_EXPERT}.pkl'):
         print('Loading buffer')
-        buffer.load(f'./saved/buffer_{EPISODE_COUNT_TRANING}_random.pkl')
+        buffer.load(f'./saved/buffer_{EPISODE_COUNT_TRANING}_{DATA_TYPE}_{PORTION_EXPERT}.pkl')
     else:
         print('Generating buffer')
         for i in range(EPISODE_COUNT_TRANING):
             states, actions, rewards, next_states = [], [], [], []
             state = env.reset()
             done = False
+            policy = 'random'
+            if np.random.uniform(0, 1) < PORTION_EXPERT:
+                policy = 'expert'
             while done is False:
-                action = env.action_space.sample()
+                if policy == 'expert':
+                    state = torch.tensor(state).unsqueeze(0).float().to(device)
+                    action, _, _ = expert_policy.policy(torch.tensor(state))
+                    action = action.detach().cpu().numpy()[0]
+                    action = tune_action(expert_policy, env.action_space, action)
+                else:
+                    action = env.action_space.sample()
                 next_state, reward, done, _ = env.step(action)
                 states.append(state)
                 actions.append(action)
@@ -579,9 +626,9 @@ def main():
                 state = next_state
             buffer.store_trajectory(states, actions, rewards, next_states)
     
-    if not os.path.exists(f'./saved/buffer_{EPISODE_COUNT_TRANING}_random.pkl'):
+    if not os.path.exists(f'./saved/buffer_{EPISODE_COUNT_TRANING}_{DATA_TYPE}_{PORTION_EXPERT}.pkl'):
         print('Saving buffer')
-        buffer.save(f'./saved/buffer_{EPISODE_COUNT_TRANING}_random.pkl')
+        buffer.save(f'./saved/buffer_{EPISODE_COUNT_TRANING}_{DATA_TYPE}_{PORTION_EXPERT}.pkl')
     
     print('Buffer is Ready!')
     
