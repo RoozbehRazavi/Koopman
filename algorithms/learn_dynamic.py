@@ -251,8 +251,9 @@ class KoopamnOperator(nn.Module):
         self.B.requires_grad = True
         
         # try to avoid degenerated case, can it be fixed with initialization?
-        torch.nn.init.normal_(self.A, mean=0, std=1)
-        torch.nn.init.normal_(self.B, mean=0, std=1)
+        # TODO changed from 1 to 0.1
+        torch.nn.init.normal_(self.A, mean=0, std=.1)
+        torch.nn.init.normal_(self.B, mean=0, std=.1)
 
     def forward(self, states, actions):
         result = states + TAU * torch.matmul(states, self.A.transpose(0, 1))+torch.matmul(actions, self.B.transpose(0, 1))
@@ -532,7 +533,7 @@ def eval_lqr(env, koopman_mapping, koopman_operator, cost_learning, koopman_dim,
 
 def main():
     EPOCH = 1000
-    EPISODE_COUNT_TRANING = 10000
+    EPISODE_COUNT_TRANING = 1000
     KOOPMAN_MAPPING_FRE = 32
     KOOPMAN_MAPPING_EPOCH = 2
     KOOPMAN_MAPPING_BATCH_SIZE = 64
@@ -542,6 +543,7 @@ def main():
     KOOPMAN_DIM = 64
     BATCH_SIZE = 32
     LEN_PRED = 1
+    MAX_STEPS = 100
 
     # TODO 
     EVAL_INTERVAL = 5
@@ -582,13 +584,13 @@ def main():
     
     env = NormalizeObservation(env)
     
-    env = FixLenWrapper(env, max_steps=100)
+    env = FixLenWrapper(env, max_steps=MAX_STEPS)
 
     expert_policy = PPO('CnnPolicy', env=env, verbose=1, device=device)
 
     if os.path.exists(f'./saved/ppo_expert_policy_{EXPERT_POLICY_FRAME}.zip'):
-        print('Load Exper Policy')
-        expert_policy.load(f'/saved/ppo_expert_policy_{EXPERT_POLICY_FRAME}.zip')
+        print('Load Expert Policy')
+        expert_policy.load(f'./saved/ppo_expert_policy_{EXPERT_POLICY_FRAME}')
     else:
         print('Train Expert Policy')
         expert_policy.learn(total_timesteps=EXPERT_POLICY_FRAME)
@@ -612,8 +614,8 @@ def main():
                 policy = 'expert'
             while done is False:
                 if policy == 'expert':
-                    state = torch.tensor(state).unsqueeze(0).float().to(device)
-                    action, _, _ = expert_policy.policy(torch.tensor(state))
+                    state_ = torch.tensor(state).unsqueeze(0).float().to(device)
+                    action, _, _ = expert_policy.policy(torch.tensor(state_))
                     action = action.detach().cpu().numpy()[0]
                     action = tune_action(expert_policy, env.action_space, action)
                 else:
