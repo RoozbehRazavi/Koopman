@@ -172,7 +172,6 @@ class KoopmanMapping(nn.Module):
         z_t, h_n = self(states)
         
         # Increase this as traning goes on
-        #LEN_PRED = 2
 
         z_future = torch.zeros((N, T, LEN_PRED, self.embedding_dim))  # Initialize future state embeddings (N x hidden_dim)
 
@@ -483,7 +482,7 @@ def log_weights(koopman_mapping:KoopmanMapping, koopman_operator:KoopamnOperator
         if param.grad is not None:
             writer.add_scalar(f'Gradients/{name}', param.grad.norm(), epoch)
 
-def eval_lqr(env, koopman_mapping, koopman_operator, cost_learning, koopman_dim, writer, device, horizen=10, num_episodes=100, gamma=0.99):
+def eval_lqr(epoch, env, koopman_mapping, koopman_operator, cost_learning, koopman_dim, writer, device, horizen=10, num_episodes=100, gamma=0.99):
     controller =KoopmanLQR(A=koopman_operator.A,
                 B=koopman_operator.B,
                 q_diag_log=cost_learning._q_diag_log,
@@ -503,8 +502,8 @@ def eval_lqr(env, koopman_mapping, koopman_operator, cost_learning, koopman_dim,
             state, reward, done, _ = env.step(action)
             ret = ret * gamma + reward
         values1.append(ret)
-    writer.add_scalar('Evaluation/mean_return', np.mean(values1), i)
-    writer.add_scalar('Evaluation/std_return', np.std(values1), i)
+    writer.add_scalar('Evaluation/mean_return', np.mean(values1), epoch)
+    writer.add_scalar('Evaluation/std_return', np.std(values1), epoch)
 
     controller_transpose = KoopmanLQR(A=koopman_operator.A.transpose(0, 1),
                             B=koopman_operator.B,
@@ -525,8 +524,8 @@ def eval_lqr(env, koopman_mapping, koopman_operator, cost_learning, koopman_dim,
             state, reward, done, _ = env.step(action)
             ret = ret * gamma + reward
         values2.append(ret)
-    writer.add_scalar('Evaluation/mean_return_transpose', np.mean(values2), i)
-    writer.add_scalar('Evaluation/std_return_transpose', np.std(values2), i)
+    writer.add_scalar('Evaluation/mean_return_transpose', np.mean(values2), epoch)
+    writer.add_scalar('Evaluation/std_return_transpose', np.std(values2), epoch)
 
     return np.mean(values1), np.mean(values2) 
 
@@ -542,7 +541,7 @@ def main():
     OBS_EMBEDDING_DIM = 64
     KOOPMAN_DIM = 64
     BATCH_SIZE = 32
-    LEN_PRED = 1
+    LEN_PRED = 8
     MAX_STEPS = 100
 
     # TODO 
@@ -645,7 +644,7 @@ def main():
 
     koopman_mapping_optimizer = torch.optim.Adam(koopman_mapping.parameters(), lr=1e-3)
     koopman_operator_optimizer = torch.optim.Adam(koopman_operator.parameters(), lr=1e-3)  
-    cost_learning_optimizer = torch.optim.Adam(cost_learning.parameters(), lr=1e-3)
+    cost_learning_optimizer = torch.optim.Adam(cost_learning.parameters(), lr=1e-2)
 
     for i in range(EPOCH):
         if i % KOOPMAN_MAPPING_FRE == 0:
@@ -698,7 +697,7 @@ def main():
         cost_learning_optimizer.step()
 
         if i % EVAL_INTERVAL == 0:
-            values1, values2 = eval_lqr(env, koopman_mapping, koopman_operator, cost_learning, KOOPMAN_DIM, writer, device)
+            values1, values2 = eval_lqr(i, env, koopman_mapping, koopman_operator, cost_learning, KOOPMAN_DIM, writer, device)
             log_weights(koopman_mapping, koopman_operator, cost_learning, i, writer)
             print(f'Epoch: {i}, Mapping Loss: {koopman_mapping_loss.item()}, Operator Loss: {koopman_operator_loss.item()}, Cost Loss: {cost_learning_loss.item()}, Controller: {values1}, Controller_T: {values2}')
 
