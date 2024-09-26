@@ -153,7 +153,7 @@ class KoopmanMapping(nn.Module):
             print('Nan or Inf')
         return result
 
-    def loss_function1(self, A: nn.Parameter, B: nn.Parameter, states, actions, LEN_PRED, nagative_count=10):
+    def loss_function1(self, A: nn.Parameter, B: nn.Parameter, states, actions, LEN_PRED, nagative_count=20):
         """
         Arguments:
             A: Dynamics matrix of size (d x d)
@@ -258,8 +258,22 @@ class KoopamnOperator(nn.Module):
         result = states + TAU * torch.matmul(states, self.A.transpose(0, 1))+torch.matmul(actions, self.B.transpose(0, 1))
         return result
     
+    def regularize_largest_eigenvalue(self):
+        # Compute the eigenvalues of matrix A
+        eigenvalues = torch.linalg.eigvals(self.A)
+
+        # Take the absolute values (to handle complex eigenvalues) and find the largest
+        largest_eigenvalue = torch.max(eigenvalues.abs())
+
+        # Return the largest eigenvalue as the regularization term
+        return largest_eigenvalue
+
+    # TODO if reg should have lower weight?
     def loss_function(self, states, actions, next_states):
-        return nn.MSELoss()(self(states, actions), next_states).mean()
+        rec_loss = nn.MSELoss()(self(states, actions), next_states).mean()
+        reg_loss = self.regularize_largest_eigenvalue()
+        return rec_loss, reg_loss
+
 
 
 class CostLearning(nn.Module):
@@ -536,12 +550,13 @@ def main():
     KOOPMAN_MAPPING_FRE = 32
     KOOPMAN_MAPPING_EPOCH = 2
     KOOPMAN_MAPPING_BATCH_SIZE = 64
+    KOOPMAN_OPT_REG = 0.01
 
     RNN_HIDDEN_DIM = 256
     OBS_EMBEDDING_DIM = 64
     KOOPMAN_DIM = 64
     BATCH_SIZE = 32
-    LEN_PRED = 8
+    LEN_PRED = 32
     MAX_STEPS = 100
 
     # TODO 
@@ -683,14 +698,14 @@ def main():
         with torch.no_grad():
             states, _ = koopman_mapping(states)
             next_states, _ = koopman_mapping(next_states)
-            
-        koopman_operator_loss = koopman_operator.loss_function(states, actions, next_states)
+        
+        koopman_operator_loss, reg_loss = koopman_operator.loss_function(states, actions, next_states)
         cost_learning_loss = cost_learning.loss_function(states, actions, rewards)
 
         koopman_operator_optimizer.zero_grad()
         cost_learning_optimizer.zero_grad()
 
-        koopman_operator_loss.backward()
+        (koopman_operator_loss + KOOPMAN_OPT_REG * reg_loss).backward()
         cost_learning_loss.backward()
 
         koopman_operator_optimizer.step()
@@ -699,7 +714,7 @@ def main():
         if i % EVAL_INTERVAL == 0:
             values1, values2 = eval_lqr(i, env, koopman_mapping, koopman_operator, cost_learning, KOOPMAN_DIM, writer, device)
             log_weights(koopman_mapping, koopman_operator, cost_learning, i, writer)
-            print(f'Epoch: {i}, Mapping Loss: {koopman_mapping_loss.item()}, Operator Loss: {koopman_operator_loss.item()}, Cost Loss: {cost_learning_loss.item()}, Controller: {values1}, Controller_T: {values2}')
+            print(f'Epoch: {i}, Mapping Loss: {koopman_mapping_loss.item()}, Operator Loss: {koopman_operator_loss.item()}, Reg Loss: {reg_loss.item()}, Cost Loss: {cost_learning_loss.item()}, Controller: {values1}, Controller_T: {values2}')
 
         if i % SAVE_INTERVAL == 0:
             torch.save(koopman_mapping.state_dict(), f'{save_dir}/koopman_mapping_{i}.pt')
@@ -708,6 +723,7 @@ def main():
 
         writer.add_scalar('Loss/koopman_mapping', koopman_mapping_loss, i)
         writer.add_scalar('Loss/koopman_operator', koopman_operator_loss, i)
+        writer.add_scalar('Loss/reg_loss', reg_loss, i)
         writer.add_scalar('Loss/cost_learning', cost_learning_loss, i)
 
 
