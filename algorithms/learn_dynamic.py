@@ -48,7 +48,7 @@ def tune_action(ppo, action_space, action):
     return clipped_actions
 
 class KoopmanMapping(nn.Module):
-    def __init__(self, obs_dim, hidden_dim, embedding_dim) -> None:
+    def __init__(self, obs_dim, hidden_dim, embedding_dim, image_size=64) -> None:
         super().__init__()
         self.obs_dim = obs_dim
         self.hidden_dim = hidden_dim
@@ -66,6 +66,16 @@ class KoopmanMapping(nn.Module):
         )
         # Define an RNN for processing sequences (trajectories)
         self.rnn = nn.GRU(input_size=obs_dim, hidden_size=hidden_dim, batch_first=True)
+
+        # Define decoder 
+        self.decoder = nn.Sequential(
+            nn.Linear(hidden_dim, 2048),
+            nn.ReLU(),
+            nn.Linear(2048, 1024),
+            nn.ReLU(),
+            nn.Linear(1024, 512),
+            nn.ReLU(),
+            nn.Linear(512, image_size*image_size*3))
         
         # MLP to get anchor embedding from RNN hidden state
         self.anchor_emebedding_head = nn.Sequential(
@@ -112,7 +122,7 @@ class KoopmanMapping(nn.Module):
             z_anchor = self.anchor_emebedding_head(hidden_state)  # (N x embedding_dim)
         else:
             z_anchor = self.pos_neg_embedding_head(hidden_state)
-        return z_anchor, h_n
+        return z_anchor, h_n, hidden_state
 
     # def similarity(self, z1, z2, temperature=0.1):
     #     # Normalize z1 and z2 to unit vectors
@@ -169,10 +179,15 @@ class KoopmanMapping(nn.Module):
         d = states.shape[2]  # State dimension
         
         # Step 1: Compute the anchor (future) state in the embedding space
-        z_t, h_n = self(states)
+        z_t, h_n, hidden_state = self(states)
         
-        # Increase this as traning goes on
+        if False:
+            decoded_image = self.decoder(hidden_state)
 
+            decoder_loss = nn.MSELoss()(decoded_image.reshape(N*T, -1), states.reshape((N*T, -1))).mean()
+        else:
+            decoder_loss = torch.tensor(0.0, requires_grad=True)
+        # Increase this as traning goes on
         z_future = torch.zeros((N, T, LEN_PRED, self.embedding_dim))  # Initialize future state embeddings (N x hidden_dim)
 
         # TODO we should have masking here too!
@@ -194,7 +209,7 @@ class KoopmanMapping(nn.Module):
                     z_future[:, n, m] += TAU * effect.squeeze(-1)
 
         # Pass positive samples through the RNN and get embeddings
-        z_positive, h_n = self(states, anchor=False)  # (1 x N x hidden_dim)
+        z_positive, h_n, _ = self(states, anchor=False)  # (1 x N x hidden_dim)
         loss = torch.tensor(0.0)
         counter = 0
         nan_counter = 0
@@ -231,7 +246,7 @@ class KoopmanMapping(nn.Module):
         print('Nan: ', nan_counter, ' Inf: ', inf_counter)
         if loss == 0:
             return loss, False
-        return loss/counter, True
+        return loss/counter, decoder_loss, True
 
     # def update_momentum_encoder(self, momentum=0.999):
     #     # Update the momentum encoder (positive/negative embedding head) using EMA of anchor embedding head
@@ -299,7 +314,7 @@ class CostLearning(nn.Module):
     def loss_function(self, states, actions, rewards):
         B, T = rewards.shape
         rewards = rewards.reshape(B*T, -1)
-        return ((self(states, actions) - rewards) ** 2).mean()
+        return ((self(states, actions) + rewards) ** 2).mean()
 
 
 class TrajectoryBuffer:
@@ -328,6 +343,36 @@ class TrajectoryBuffer:
         with open(file_path, 'rb') as f:
             self.buffer = pickle.load(f)
 
+class QuadraticRewardWrapper(gym.Wrapper):
+    def __init__(self, env):
+        super(QuadraticRewardWrapper, self).__init__(env)
+    
+    def step(self, action):
+        # Take a step in the environment
+        state, reward, done, info = self.env.step(action)
+        
+        # Unpack the state vector for CartPole
+        # state = [cart position, cart velocity, pole angle, pole angular velocity]
+        breakpoint()
+        tmp = self.env.env.env.env.env.current_state
+        cart_pos, cart_vel, pole_angle, pole_angular_vel = tmp[0], tmp[1], tmp[2], tmp[3]
+        
+        # Define the quadratic reward with respect to state and action
+        # You can customize the coefficients for each term here
+        quadratic_reward = -(
+            1.0 * (cart_pos**2) +  # quadratic penalty on cart position
+            0.5 * (cart_vel**2) +  # quadratic penalty on cart velocity
+            2.0 * (pole_angle**2) +  # quadratic penalty on pole angle
+            0.5 * (pole_angular_vel**2) +  # quadratic penalty on pole angular velocity
+            0.1 * (action**2)  # quadratic penalty on action
+        )
+        
+        # Return the new state, modified quadratic reward, done flag, and info
+        return state, quadratic_reward, done, info
+    
+    def reset(self, **kwargs):
+        return self.env.reset(**kwargs)
+    
 
 class FixLenWrapper(gym.Wrapper):
     def __init__(self, env: gym.Env, max_steps: int):
@@ -511,7 +556,7 @@ def eval_lqr(epoch, env, koopman_mapping, koopman_operator, cost_learning, koopm
         while done is False:
             state = torch.tensor(state, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
             with torch.no_grad():
-                state, hidden_state = koopman_mapping(state, h_0=hidden_state)
+                state, hidden_state, _ = koopman_mapping(state, h_0=hidden_state)
                 action = controller(state[0]).detach().cpu().numpy()[0]
             state, reward, done, _ = env.step(action)
             ret = ret * gamma + reward
@@ -533,7 +578,7 @@ def eval_lqr(epoch, env, koopman_mapping, koopman_operator, cost_learning, koopm
         while done is False:
             state = torch.tensor(state, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
             with torch.no_grad():
-                state, hidden_state = koopman_mapping(state, h_0=hidden_state)
+                state, hidden_state, _ = koopman_mapping(state, h_0=hidden_state)
                 action = controller_transpose(state[0]).detach().cpu().numpy()[0]
             state, reward, done, _ = env.step(action)
             ret = ret * gamma + reward
@@ -550,14 +595,15 @@ def main():
     KOOPMAN_MAPPING_FRE = 32
     KOOPMAN_MAPPING_EPOCH = 2
     KOOPMAN_MAPPING_BATCH_SIZE = 64
-    KOOPMAN_OPT_REG = 0.01
+    KOOPMAN_OPT_REG = 0.001
 
     RNN_HIDDEN_DIM = 256
     OBS_EMBEDDING_DIM = 64
     KOOPMAN_DIM = 64
     BATCH_SIZE = 32
     LEN_PRED = 32
-    MAX_STEPS = 100
+    MAX_STEPS = 400
+    IMAGE_SIZE = 64
 
     # TODO 
     EVAL_INTERVAL = 5
@@ -592,31 +638,33 @@ def main():
             seed=1,
             visualize_reward=False,
             from_pixels='pixel',
-            height=64,
-            width=64,
+            height=IMAGE_SIZE,
+            width=IMAGE_SIZE,
             frame_skip=1)
     
     env = NormalizeObservation(env)
     
     env = FixLenWrapper(env, max_steps=MAX_STEPS)
 
+    env = QuadraticRewardWrapper(env)
+
     expert_policy = PPO('CnnPolicy', env=env, verbose=1, device=device)
 
-    if os.path.exists(f'./saved/ppo_expert_policy_{EXPERT_POLICY_FRAME}.zip'):
+    if os.path.exists(f'./saved/ppo_expert_policy_{EXPERT_POLICY_FRAME}_new_rew.zip'):
         print('Load Expert Policy')
-        expert_policy.load(f'./saved/ppo_expert_policy_{EXPERT_POLICY_FRAME}')
+        expert_policy.load(f'./saved/ppo_expert_policy_{EXPERT_POLICY_FRAME}_new_rew')
     else:
         print('Train Expert Policy')
         expert_policy.learn(total_timesteps=EXPERT_POLICY_FRAME)
-        expert_policy.save(f'./saved/ppo_expert_policy_{EXPERT_POLICY_FRAME}')
+        expert_policy.save(f'./saved/ppo_expert_policy_{EXPERT_POLICY_FRAME}_new_rew')
     
     print('Expert Policy is Ready!')
 
     buffer = TrajectoryBuffer(buffer_size=EPISODE_COUNT_TRANING)
 
-    if os.path.exists(f'./saved/buffer_{EPISODE_COUNT_TRANING}_{DATA_TYPE}_{PORTION_EXPERT}.pkl'):
+    if os.path.exists(f'./saved/buffer_{EPISODE_COUNT_TRANING}_{DATA_TYPE}_{PORTION_EXPERT}_new_rew.pkl'):
         print('Loading buffer')
-        buffer.load(f'./saved/buffer_{EPISODE_COUNT_TRANING}_{DATA_TYPE}_{PORTION_EXPERT}.pkl')
+        buffer.load(f'./saved/buffer_{EPISODE_COUNT_TRANING}_{DATA_TYPE}_{PORTION_EXPERT}_new_rew.pkl')
     else:
         print('Generating buffer')
         for i in range(EPISODE_COUNT_TRANING):
@@ -642,9 +690,9 @@ def main():
                 state = next_state
             buffer.store_trajectory(states, actions, rewards, next_states)
     
-    if not os.path.exists(f'./saved/buffer_{EPISODE_COUNT_TRANING}_{DATA_TYPE}_{PORTION_EXPERT}.pkl'):
+    if not os.path.exists(f'./saved/buffer_{EPISODE_COUNT_TRANING}_{DATA_TYPE}_{PORTION_EXPERT}_new_rew.pkl'):
         print('Saving buffer')
-        buffer.save(f'./saved/buffer_{EPISODE_COUNT_TRANING}_{DATA_TYPE}_{PORTION_EXPERT}.pkl')
+        buffer.save(f'./saved/buffer_{EPISODE_COUNT_TRANING}_{DATA_TYPE}_{PORTION_EXPERT}_new_rew.pkl')
     
     print('Buffer is Ready!')
     
@@ -677,7 +725,8 @@ def main():
                 # actions = torch.tensor([x['actions'] for x in batch], dtype=torch.float32).to(device)
                 # rewards = torch.tensor([x['rewards'] for x in batch], dtype=torch.float32).to(device)
                 # next_states = torch.tensor([x['next_states'] for x in batch], dtype=torch.float32).to(device)
-                koopman_mapping_loss, flag = koopman_mapping.loss_function1(koopman_operator.A.clone().detach(),
+                # TODO !
+                koopman_mapping_loss, decoder_loss, flag = koopman_mapping.loss_function1(koopman_operator.A.clone().detach(),
                                                             koopman_operator.B.clone().detach(),
                                                             states, actions, LEN_PRED)
                 if flag:
@@ -696,8 +745,8 @@ def main():
         next_states = torch.stack(next_states, dim=0).to(device)
 
         with torch.no_grad():
-            states, _ = koopman_mapping(states)
-            next_states, _ = koopman_mapping(next_states)
+            states, _, _ = koopman_mapping(states)
+            next_states, _, _ = koopman_mapping(next_states)
         
         koopman_operator_loss, reg_loss = koopman_operator.loss_function(states, actions, next_states)
         cost_learning_loss = cost_learning.loss_function(states, actions, rewards)
