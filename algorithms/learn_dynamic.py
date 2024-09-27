@@ -353,7 +353,6 @@ class QuadraticRewardWrapper(gym.Wrapper):
         
         # Unpack the state vector for CartPole
         # state = [cart position, cart velocity, pole angle, pole angular velocity]
-        breakpoint()
         tmp = self.env.env.env.env.env.current_state
         cart_pos, cart_vel, pole_angle, pole_angular_vel = tmp[0], tmp[1], tmp[2], tmp[3]
         
@@ -621,12 +620,13 @@ def main():
         DATA_TYPE = 'MIX'
 
     start_time = time.strftime("%Y-%m-%d_%H-%M-%S")
-    run_id = f"len{LEN_PRED}_{start_time}"
+    run_id = f"new_rew_len{LEN_PRED}_{start_time}"
 
     save_dir = f'./saved/{run_id}'
     logdir = F'./log/{run_id}'
 
     setup_directory(save_dir)
+    setup_directory(logdir)
     
     writer = SummaryWriter(log_dir=logdir)
     
