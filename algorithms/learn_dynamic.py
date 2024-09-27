@@ -360,10 +360,10 @@ class QuadraticRewardWrapper(gym.Wrapper):
         # You can customize the coefficients for each term here
         quadratic_reward = -(
             1.0 * (cart_pos**2) +  # quadratic penalty on cart position
-            0.5 * (cart_vel**2) +  # quadratic penalty on cart velocity
-            2.0 * (pole_angle**2) +  # quadratic penalty on pole angle
-            0.5 * (pole_angular_vel**2) +  # quadratic penalty on pole angular velocity
-            0.1 * (action**2)  # quadratic penalty on action
+            #0.5 * (cart_vel**2) +  # quadratic penalty on cart velocity
+            2.0 * (pole_angle**2) #+  # quadratic penalty on pole angle
+            #0.5 * (pole_angular_vel**2) +  # quadratic penalty on pole angular velocity
+            #0.1 * (action**2)  # quadratic penalty on action
         )
         
         # Return the new state, modified quadratic reward, done flag, and info
@@ -541,27 +541,6 @@ def log_weights(koopman_mapping:KoopmanMapping, koopman_operator:KoopamnOperator
             writer.add_scalar(f'Gradients/{name}', param.grad.norm(), epoch)
 
 def eval_lqr(epoch, env, koopman_mapping, koopman_operator, cost_learning, koopman_dim, writer, device, horizen=10, num_episodes=100, gamma=0.99):
-    controller =KoopmanLQR(A=koopman_operator.A,
-                B=koopman_operator.B,
-                q_diag_log=cost_learning._q_diag_log,
-                r_diag_log=cost_learning._r_diag_log,
-                koopman_dim=koopman_dim, horizen=horizen, action_dim=1)
-    values1 = []
-    for i in range(num_episodes):
-        state = env.reset()
-        done = False
-        hidden_state = None
-        ret = 0
-        while done is False:
-            state = torch.tensor(state, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
-            with torch.no_grad():
-                state, hidden_state, _ = koopman_mapping(state, h_0=hidden_state)
-                action = controller(state[0]).detach().cpu().numpy()[0]
-            state, reward, done, _ = env.step(action)
-            ret = ret * gamma + reward
-        values1.append(ret)
-    writer.add_scalar('Evaluation/mean_return', np.mean(values1), epoch)
-    writer.add_scalar('Evaluation/std_return', np.std(values1), epoch)
 
     controller_transpose = KoopmanLQR(A=koopman_operator.A.transpose(0, 1),
                             B=koopman_operator.B,
@@ -585,7 +564,7 @@ def eval_lqr(epoch, env, koopman_mapping, koopman_operator, cost_learning, koopm
     writer.add_scalar('Evaluation/mean_return_transpose', np.mean(values2), epoch)
     writer.add_scalar('Evaluation/std_return_transpose', np.std(values2), epoch)
 
-    return np.mean(values1), np.mean(values2) 
+    return np.mean(values2) 
 
 
 def main():
@@ -601,7 +580,7 @@ def main():
     KOOPMAN_DIM = 64
     BATCH_SIZE = 32
     LEN_PRED = 32
-    MAX_STEPS = 400
+    MAX_STEPS = 200
     IMAGE_SIZE = 64
 
     # TODO 
@@ -761,9 +740,9 @@ def main():
         cost_learning_optimizer.step()
 
         if i % EVAL_INTERVAL == 0:
-            values1, values2 = eval_lqr(i, env, koopman_mapping, koopman_operator, cost_learning, KOOPMAN_DIM, writer, device)
+            values2 = eval_lqr(i, env, koopman_mapping, koopman_operator, cost_learning, KOOPMAN_DIM, writer, device)
             log_weights(koopman_mapping, koopman_operator, cost_learning, i, writer)
-            print(f'Epoch: {i}, Mapping Loss: {koopman_mapping_loss.item()}, Operator Loss: {koopman_operator_loss.item()}, Reg Loss: {reg_loss.item()}, Cost Loss: {cost_learning_loss.item()}, Controller: {values1}, Controller_T: {values2}')
+            print(f'Epoch: {i}, Mapping Loss: {koopman_mapping_loss.item()}, Operator Loss: {koopman_operator_loss.item()}, Reg Loss: {reg_loss.item()}, Cost Loss: {cost_learning_loss.item()}, Controller_T: {values2}')
 
         if i % SAVE_INTERVAL == 0:
             torch.save(koopman_mapping.state_dict(), f'{save_dir}/koopman_mapping_{i}.pt')
