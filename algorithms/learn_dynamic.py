@@ -579,7 +579,7 @@ def main():
     OBS_EMBEDDING_DIM = 64
     KOOPMAN_DIM = 64
     BATCH_SIZE = 32
-    LEN_PRED = 32
+    LEN_PRED = 1
     MAX_STEPS = 200
     IMAGE_SIZE = 64
 
@@ -588,7 +588,10 @@ def main():
     SAVE_INTERVAL = 100
     LOAD=False
     EXPERT_POLICY_FRAME  = 1000000
-    PORTION_EXPERT = 0.5
+    PORTION_EXPERT = 0.0
+
+    ENV_NAME = 'cartpole'
+    TASK_NAME = 'swingup'
 
     DATA_TYPE = 'MIX'
     if PORTION_EXPERT == 0:
@@ -599,10 +602,10 @@ def main():
         DATA_TYPE = 'MIX'
 
     start_time = time.strftime("%Y-%m-%d_%H-%M-%S")
-    run_id = f"new_rew_len{LEN_PRED}_{start_time}"
+    run_id = f"new_rew_random_len{LEN_PRED}_{start_time}"
 
-    save_dir = f'./saved/{run_id}'
-    logdir = F'./log/{run_id}'
+    save_dir = f'saved/{TASK_NAME}_{ENV_NAME}'
+    logdir = F'log/task_{TASK_NAME}_env_{ENV_NAME}'
 
     setup_directory(save_dir)
     setup_directory(logdir)
@@ -612,8 +615,8 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     env = dmc2gym.make(
-            domain_name="cartpole",
-            task_name='swingup',
+            domain_name=ENV_NAME,
+            task_name=TASK_NAME,
             seed=1,
             visualize_reward=False,
             from_pixels='pixel',
@@ -625,25 +628,25 @@ def main():
     
     env = FixLenWrapper(env, max_steps=MAX_STEPS)
 
-    env = QuadraticRewardWrapper(env)
+    #env = QuadraticRewardWrapper(env)
 
     expert_policy = PPO('CnnPolicy', env=env, verbose=1, device=device)
 
-    if os.path.exists(f'./saved/ppo_expert_policy_{EXPERT_POLICY_FRAME}_new_rew.zip'):
+    if os.path.exists(f'./{save_dir}/ppo_expert_policy_{EXPERT_POLICY_FRAME}_new_rew.zip'):
         print('Load Expert Policy')
-        expert_policy.load(f'./saved/ppo_expert_policy_{EXPERT_POLICY_FRAME}_new_rew')
+        expert_policy.load(f'./{save_dir}/ppo_expert_policy_{EXPERT_POLICY_FRAME}_new_rew')
     else:
         print('Train Expert Policy')
         expert_policy.learn(total_timesteps=EXPERT_POLICY_FRAME)
-        expert_policy.save(f'./saved/ppo_expert_policy_{EXPERT_POLICY_FRAME}_new_rew')
+        expert_policy.save(f'./{save_dir}/ppo_expert_policy_{EXPERT_POLICY_FRAME}_new_rew')
     
     print('Expert Policy is Ready!')
 
     buffer = TrajectoryBuffer(buffer_size=EPISODE_COUNT_TRANING)
 
-    if os.path.exists(f'./saved/buffer_{EPISODE_COUNT_TRANING}_{DATA_TYPE}_{PORTION_EXPERT}_new_rew.pkl'):
+    if os.path.exists(f'./{save_dir}/buffer_{EPISODE_COUNT_TRANING}_{DATA_TYPE}_{PORTION_EXPERT}_new_rew.pkl'):
         print('Loading buffer')
-        buffer.load(f'./saved/buffer_{EPISODE_COUNT_TRANING}_{DATA_TYPE}_{PORTION_EXPERT}_new_rew.pkl')
+        buffer.load(f'./{save_dir}/buffer_{EPISODE_COUNT_TRANING}_{DATA_TYPE}_{PORTION_EXPERT}_new_rew.pkl')
     else:
         print('Generating buffer')
         for i in range(EPISODE_COUNT_TRANING):
@@ -669,9 +672,9 @@ def main():
                 state = next_state
             buffer.store_trajectory(states, actions, rewards, next_states)
     
-    if not os.path.exists(f'./saved/buffer_{EPISODE_COUNT_TRANING}_{DATA_TYPE}_{PORTION_EXPERT}_new_rew.pkl'):
+    if not os.path.exists(f'./{save_dir}/buffer_{EPISODE_COUNT_TRANING}_{DATA_TYPE}_{PORTION_EXPERT}_new_rew.pkl'):
         print('Saving buffer')
-        buffer.save(f'./saved/buffer_{EPISODE_COUNT_TRANING}_{DATA_TYPE}_{PORTION_EXPERT}_new_rew.pkl')
+        buffer.save(f'./{save_dir}/buffer_{EPISODE_COUNT_TRANING}_{DATA_TYPE}_{PORTION_EXPERT}_new_rew.pkl')
     
     print('Buffer is Ready!')
     
@@ -680,9 +683,9 @@ def main():
     cost_learning = CostLearning(state_dim=KOOPMAN_DIM, action_dim=1).to(device)
 
     if LOAD:
-        koopman_mapping.load_state_dict(torch.load(f'{save_dir}/koopman_mapping_100'))
-        koopman_operator.load_state_dict(torch.load(f'{save_dir}/koopman_operator_100'))
-        cost_learning.load_state_dict(torch.load(f'{save_dir}/cost_learning_100'))
+        koopman_mapping.load_state_dict(torch.load(f'{save_dir}_{run_id}/koopman_mapping_100'))
+        koopman_operator.load_state_dict(torch.load(f'{save_dir}_{run_id}/koopman_operator_100'))
+        cost_learning.load_state_dict(torch.load(f'{save_dir}_{run_id}/cost_learning_100'))
 
     koopman_mapping_optimizer = torch.optim.Adam(koopman_mapping.parameters(), lr=1e-3)
     koopman_operator_optimizer = torch.optim.Adam(koopman_operator.parameters(), lr=1e-3)  
@@ -745,9 +748,9 @@ def main():
             print(f'Epoch: {i}, Mapping Loss: {koopman_mapping_loss.item()}, Operator Loss: {koopman_operator_loss.item()}, Reg Loss: {reg_loss.item()}, Cost Loss: {cost_learning_loss.item()}, Controller_T: {values2}')
 
         if i % SAVE_INTERVAL == 0:
-            torch.save(koopman_mapping.state_dict(), f'{save_dir}/koopman_mapping_{i}.pt')
-            torch.save(koopman_operator.state_dict(), f'{save_dir}/koopman_operator_{i}.pt')
-            torch.save(cost_learning.state_dict(), f'{save_dir}/cost_learning_{i}.pt')
+            torch.save(koopman_mapping.state_dict(), f'{save_dir}_{run_id}/koopman_mapping_{i}.pt')
+            torch.save(koopman_operator.state_dict(), f'{save_dir}_{run_id}/koopman_operator_{i}.pt')
+            torch.save(cost_learning.state_dict(), f'{save_dir}_{run_id}/cost_learning_{i}.pt')
 
         writer.add_scalar('Loss/koopman_mapping', koopman_mapping_loss, i)
         writer.add_scalar('Loss/koopman_operator', koopman_operator_loss, i)
