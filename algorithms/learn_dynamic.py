@@ -392,7 +392,7 @@ class FixLenWrapper(gym.Wrapper):
         else:
             self.step_count += 1
             done = False
-        return state, reward, done, info
+        return state, -1/reward , done, info
 
 class KoopmanLQR(nn.Module):
     def __init__(self, A, B, q_diag_log, r_diag_log, koopman_dim, horizen, action_dim, g_goal=None):
@@ -540,7 +540,7 @@ def log_weights(koopman_mapping:KoopmanMapping, koopman_operator:KoopamnOperator
         if param.grad is not None:
             writer.add_scalar(f'Gradients/{name}', param.grad.norm(), epoch)
 
-def eval_lqr(epoch, env, koopman_mapping, koopman_operator, cost_learning, koopman_dim, writer, device, horizen=10, num_episodes=100, gamma=0.99):
+def eval_lqr(epoch, env, koopman_mapping, koopman_operator, cost_learning, koopman_dim, writer, device, horizen=10, num_episodes=10, gamma=0.99):
 
     controller_transpose = KoopmanLQR(A=koopman_operator.A.transpose(0, 1),
                             B=koopman_operator.B,
@@ -602,7 +602,7 @@ def main():
         DATA_TYPE = 'MIX'
 
     start_time = time.strftime("%Y-%m-%d_%H-%M-%S")
-    run_id = f"new_rew_random_len{LEN_PRED}_{start_time}"
+    run_id = f"{DATA_TYPE}_len{LEN_PRED}_{start_time}"
 
     save_dir = f'saved/{TASK_NAME}_{ENV_NAME}'
     logdir = F'log/task_{TASK_NAME}_env_{ENV_NAME}'
@@ -632,21 +632,21 @@ def main():
 
     expert_policy = PPO('CnnPolicy', env=env, verbose=1, device=device)
 
-    if os.path.exists(f'./{save_dir}/ppo_expert_policy_{EXPERT_POLICY_FRAME}_new_rew.zip'):
+    if os.path.exists(f'./{save_dir}/ppo_expert_policy_{EXPERT_POLICY_FRAME}.zip'):
         print('Load Expert Policy')
-        expert_policy.load(f'./{save_dir}/ppo_expert_policy_{EXPERT_POLICY_FRAME}_new_rew')
+        expert_policy.load(f'./{save_dir}/ppo_expert_policy_{EXPERT_POLICY_FRAME}')
     else:
         print('Train Expert Policy')
         expert_policy.learn(total_timesteps=EXPERT_POLICY_FRAME)
-        expert_policy.save(f'./{save_dir}/ppo_expert_policy_{EXPERT_POLICY_FRAME}_new_rew')
+        expert_policy.save(f'./{save_dir}/ppo_expert_policy_{EXPERT_POLICY_FRAME}')
     
     print('Expert Policy is Ready!')
 
     buffer = TrajectoryBuffer(buffer_size=EPISODE_COUNT_TRANING)
 
-    if os.path.exists(f'./{save_dir}/buffer_{EPISODE_COUNT_TRANING}_{DATA_TYPE}_{PORTION_EXPERT}_new_rew.pkl'):
+    if os.path.exists(f'./{save_dir}/buffer_{EPISODE_COUNT_TRANING}_{DATA_TYPE}_{PORTION_EXPERT}.pkl'):
         print('Loading buffer')
-        buffer.load(f'./{save_dir}/buffer_{EPISODE_COUNT_TRANING}_{DATA_TYPE}_{PORTION_EXPERT}_new_rew.pkl')
+        buffer.load(f'./{save_dir}/buffer_{EPISODE_COUNT_TRANING}_{DATA_TYPE}_{PORTION_EXPERT}.pkl')
     else:
         print('Generating buffer')
         for i in range(EPISODE_COUNT_TRANING):
@@ -672,9 +672,9 @@ def main():
                 state = next_state
             buffer.store_trajectory(states, actions, rewards, next_states)
     
-    if not os.path.exists(f'./{save_dir}/buffer_{EPISODE_COUNT_TRANING}_{DATA_TYPE}_{PORTION_EXPERT}_new_rew.pkl'):
+    if not os.path.exists(f'./{save_dir}/buffer_{EPISODE_COUNT_TRANING}_{DATA_TYPE}_{PORTION_EXPERT}.pkl'):
         print('Saving buffer')
-        buffer.save(f'./{save_dir}/buffer_{EPISODE_COUNT_TRANING}_{DATA_TYPE}_{PORTION_EXPERT}_new_rew.pkl')
+        buffer.save(f'./{save_dir}/buffer_{EPISODE_COUNT_TRANING}_{DATA_TYPE}_{PORTION_EXPERT}.pkl')
     
     print('Buffer is Ready!')
     
