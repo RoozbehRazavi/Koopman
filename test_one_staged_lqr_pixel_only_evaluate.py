@@ -12,14 +12,14 @@ import time
 import torch
 import dmc2gym
 import json
+import gym
 
 from utils import *
 import pybullet as p
 import pybulletgym.envs
 from gym.wrappers import NormalizeObservation
-
-
-
+from torch.utils.tensorboard import SummaryWriter
+import shutil
 
 
 CONFIG_PATH = '/kpmlilat/tests/test_embed_lqr_rl/config'
@@ -32,7 +32,10 @@ def parse_args():
     return args
 
 
-
+def setup_directory(dir_path):
+    if os.path.exists(dir_path):
+        shutil.rmtree(dir_path)
+    os.makedirs(dir_path)
 
 def main():
     args = parse_args()
@@ -40,7 +43,7 @@ def main():
     with open(os.path.join(CONFIG_PATH, args.config+'.yaml')) as file:
         config = yaml.safe_load(file)
     utils.set_seed_everywhere(config['seed'])
-
+    
     # set environment
     if config.get('domain_name') is not None and config.get('task_name') is not None:
         env = dmc2gym.make(

@@ -15,16 +15,55 @@ import json
 import gym
 
 import pybullet as p
-import pybulletgym.envs
 from utils.buffer import *
 from gym.wrappers import NormalizeObservation
 from utils.utils import *
 from algorithms.ae_sac import *
 from algorithms.curl_sac import *
 from algorithms.utils import *
+from torch.utils.tensorboard import SummaryWriter
 
 
 CONFIG_PATH = './config'
+
+
+class FixLenWrapper(gym.Wrapper):
+    def __init__(self, env: gym.Env, max_steps: int):
+        super().__init__(env)
+        self.step_count = 0
+        self.env._max_episode_steps = max_steps
+        self.done = False
+    
+    def reset(self, **kwargs):
+        result =  super().reset(**kwargs)
+        self.step_count = 0
+        self.done = False
+        return result
+    
+    def step(self, action):
+
+        state, reward, done, info =  super().step(action)
+
+        tmp = self.env.env.env.current_state
+        cart_pos, cart_vel, pole_angle, pole_angular_vel = tmp[0], tmp[1], tmp[2], tmp[3]
+        
+        # Define the quadratic reward with respect to state and action
+        # You can customize the coefficients for each term here
+        quadratic_reward = -(
+            1.0 * (cart_pos**2) +  # quadratic penalty on cart position
+            #0.5 * (cart_vel**2) +  # quadratic penalty on cart velocity
+            2.0 * (pole_angle**2) #+  # quadratic penalty on pole angle
+            #0.5 * (pole_angular_vel**2) +  # quadratic penalty on pole angular velocity
+            #0.1 * (action**2)  # quadratic penalty on action
+        )
+        
+        if self.step_count >= self.env._max_episode_steps - 1:
+            self.done = True
+        else:
+            self.step_count += 1
+            self.done = False
+
+        return state, quadratic_reward, self.done, info
 
 
 def parse_args():
@@ -37,7 +76,10 @@ def parse_args():
     return args
 
 
-
+def setup_directory(dir_path):
+    if os.path.exists(dir_path):
+        shutil.rmtree(dir_path)
+    os.makedirs(dir_path)
 
 def main():
     args = parse_args()
@@ -46,7 +88,17 @@ def main():
         config = yaml.safe_load(file)
 
     set_seed_everywhere(config['seed'])
+    ENV_NAME = 'cartpole'
+    TASK_NAME = 'swingup'
+    run_id = 'baseline'
+    save_dir = f'saved/{TASK_NAME}_{ENV_NAME}/{run_id}'
+    logdir = F'log/task_{TASK_NAME}_env_{ENV_NAME}/{run_id}'
 
+    setup_directory(logdir)
+    setup_directory(save_dir)
+    
+    writer = SummaryWriter(log_dir=logdir)
+    MAX_STEPS = 200
     # set environment
     if config.get('domain_name') is not None and config.get('task_name') is not None:
         env = dmc2gym.make(
@@ -60,8 +112,9 @@ def main():
             frame_skip=config['env']['action_repeat'])
     elif config.get('env_name') is not None:
         env = NormalizeObservation(gym.make(config['env_name']))
-        env._max_episode_steps = 1000
+        env._max_episode_steps = MAX_STEPS
     env.seed(config['seed'])
+    env = FixLenWrapper(env, MAX_STEPS)
 
     # stack several consecutive frames together
     if config['env']['encoder_type'] == 'pixel':
@@ -76,16 +129,16 @@ def main():
     + str(config['train']['batch_size']) + '-s' + str(config['seed'])  + '-' + config['env']['encoder_type'] + '-' + str(time.time()).split(".")[0]
     config['work_dir'] = config['work_dir'] + '/'  + exp_name
 
-    make_dir(config['work_dir'])
-    video_dir = make_dir(os.path.join(config['work_dir'], 'video'))
-    model_dir = make_dir(os.path.join(config['work_dir'], 'model'))
-    buffer_dir = make_dir(os.path.join(config['work_dir'], 'buffer'))
+    # make_dir(config['work_dir'])
+    # video_dir = make_dir(os.path.join(config['work_dir'], 'video'))
+    # model_dir = make_dir(os.path.join(config['work_dir'], 'model'))
+    # buffer_dir = make_dir(os.path.join(config['work_dir'], 'buffer'))
 
-    video = VideoRecorder(video_dir if config['save_video'] else None)
-    print("video is initialized ...")
+    # video = VideoRecorder(video_dir if config['save_video'] else None)
+    # print("video is initialized ...")
 
-    with open(os.path.join(config['work_dir'], 'args.json'), 'w') as f:
-        json.dump(config, f, sort_keys=True, indent=4)
+    # with open(os.path.join(config['work_dir'], 'args.json'), 'w') as f:
+    #     json.dump(config, f, sort_keys=True, indent=4)
 
     # device
     device = torch.device(config['device'] if torch.cuda.is_available() else 'cpu')
@@ -132,12 +185,12 @@ def main():
         # evaluate agent periodically
         if step % config['eval']['eval_freq'] == 0:
             L.log('eval/episode', episode, step)
-            evaluate(env, agent, video, config['eval']['num_eval_episodes'], L, step, config)
-            if config['save_model']:
-                agent.save_curl(model_dir, step)
-                agent.save(model_dir, step)
-            if config['save_buffer']:
-                replay_buffer.save(buffer_dir)
+            evaluate(env, agent, None, config['eval']['num_eval_episodes'], L, step, config, writer=writer)
+            # if config['save_model']:
+            #     agent.save_curl(model_dir, step)
+            #     agent.save(model_dir, step)
+            # if config['save_buffer']:
+            #     replay_buffer.save(buffer_dir)
 
         if done:
             if step > 0:
@@ -172,7 +225,7 @@ def main():
         next_obs, reward, done, _ = env.step(action)
 
         # allow infinit bootstrap
-        done_bool = 0 if episode_step + 1 == env._max_episode_steps else float(
+        done_bool = 0 if episode_step + 1 == MAX_STEPS else float(
             done
         )
         episode_reward += reward

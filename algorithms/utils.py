@@ -5,18 +5,22 @@ import pickle
 from algorithms.ae_sac import *
 from algorithms.curl_sac import *
 
-def evaluate(env, agent, video, num_episodes, L, step, config, save_transitions=False):
+def evaluate(env, agent, video, num_episodes, L, step, config, save_transitions=False, writer=None):
     all_ep_rewards = []
     all_ep_costs   = []
 
     all_fit_losses = []
+    gamma = .99
+    seed = range(num_episodes)
     all_transitions = [{"obs":[], "act":[], "rew":[], "done":[]}]*num_episodes
     def run_eval_loop(sample_stochastically=True):
         start_time = time.time()
         prefix = 'stochastic_' if sample_stochastically else ''
         for i in range(num_episodes):
+            env.seed(seed[i])
+            set_seed_everywhere(seed[i])
             obs = env.reset()
-            video.init(enabled=(i == 0))
+            # video.init(enabled=(i == 0))
             done = False
             episode_reward = 0
             episode_cost = 0  # XL: record the cost
@@ -47,7 +51,7 @@ def evaluate(env, agent, video, num_episodes, L, step, config, save_transitions=
 
                 obs, reward, done, _ = env.step(action)
                 #video.record(env)
-                episode_reward += reward
+                episode_reward = episode_reward * gamma + reward
 
                 cost = -reward  # XL: record the cost
                 episode_cost += cost
@@ -89,11 +93,11 @@ def evaluate(env, agent, video, num_episodes, L, step, config, save_transitions=
             all_fit_losses.append(episode_fit_loss/episode_timestep)
 
             # XL: record latent transition info
-            path = '/'.join(video.dir_name.split('/')[0:-1] + ['lat'] + ['{}.pkl'.format(step)])
-            folder_path = os.path.dirname(path)
-            os.makedirs(folder_path, exist_ok=True)
-            with open(path, 'wb') as f:
-                pickle.dump(episode_lat_trans, f)
+            # path = '/'.join(video.dir_name.split('/')[0:-1] + ['lat'] + ['{}.pkl'.format(step)])
+            # folder_path = os.path.dirname(path)
+            # os.makedirs(folder_path, exist_ok=True)
+            # with open(path, 'wb') as f:
+            #     pickle.dump(episode_lat_trans, f)
 
         L.log('eval/' + prefix + 'eval_time', time.time()-start_time , step)
         mean_ep_reward = np.mean(all_ep_rewards)
@@ -103,6 +107,7 @@ def evaluate(env, agent, video, num_episodes, L, step, config, save_transitions=
 
         # XL: record the cost
         mean_ep_cost = np.mean(all_ep_costs)
+        writer.add_scalar('Evaluation/mean_return_transpose', mean_ep_reward, step)
         best_ep_cost = np.min(all_ep_costs)
         L.log('eval/' + prefix + 'mean_episode_cost', mean_ep_cost, step)
         L.log('eval/' + prefix + 'best_episode_cost', best_ep_cost, step)
@@ -113,15 +118,16 @@ def evaluate(env, agent, video, num_episodes, L, step, config, save_transitions=
         L.log('eval/' + prefix + 'mean_episode_fit_loss', mean_ep_fit_loss, step)
         L.log('eval/' + prefix + 'best_episode_fit_loss', best_ep_fit_loss, step)
 
-        if save_transitions:
-            eval_path = '/'.join(video.dir_name.split('/')[0:-1] + ['eval_transitions'] + ['{}.pkl'.format(step)])
-            eval_folder_path = os.path.dirname(eval_path)
-            os.makedirs(eval_folder_path, exist_ok=True)
-            with open(eval_path, 'wb') as f:
-                pickle.dump(all_transitions, f)
+        # if save_transitions:
+        #     eval_path = '/'.join(video.dir_name.split('/')[0:-1] + ['eval_transitions'] + ['{}.pkl'.format(step)])
+        #     eval_folder_path = os.path.dirname(eval_path)
+        #     os.makedirs(eval_folder_path, exist_ok=True)
+        #     with open(eval_path, 'wb') as f:
+        #         pickle.dump(all_transitions, f)
                 
     run_eval_loop(sample_stochastically=False)
     L.dump(step)
+    set_seed_everywhere(30)
 
 
 def make_agent(obs_shape, action_shape, config, device):

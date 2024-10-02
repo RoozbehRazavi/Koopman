@@ -140,8 +140,15 @@ class KoopmanLQR(nn.Module):
             self._u_affine = nn.Parameter(self._u_affine)
         
         # try to avoid degenerated case, can it be fixed with initialization?
-        torch.nn.init.normal_(self._g_affine, mean=0, std=1)
-        torch.nn.init.normal_(self._u_affine, mean=0, std=1)
+        # torch.nn.init.normal_(self._g_affine, mean=0, std=1)
+        # torch.nn.init.normal_(self._u_affine, mean=0, std=1)
+        self._initialize_A_B(k, u_dim, 0, 0.1, seed=30)
+
+        print('A: ', self._g_affine)
+        print('B: ', self._u_affine)
+
+        self._g_affine.requires_grad = True
+        self._u_affine.requires_grad = True
 
         # parameters of quadratic functions
         self._q_diag_log = nn.Parameter(torch.zeros(self._k))  # to use: Q = diag(_q_diag_log.exp())
@@ -157,12 +164,40 @@ class KoopmanLQR(nn.Module):
         # unless we make g_goal depend on it. This allows to avoid repeatively calculate riccati recursion in eval mode
         self._riccati_solution_cache = None
         return
+    
+    def _initialize_A_B(self, n, d, mean, std, seed):
+        # Set the random seed for reproducibility
+        
+        # Initialize A (n x n) with mean=0, std=0.1
+        A_init = torch.normal(mean=mean, std=std, size=(n, n))
+        
+        # Ensure A is full rank by performing SVD and reconstructing
+        U, S, V = torch.svd(A_init)
+        S_full_rank = torch.ones_like(S)  # Set all singular values to 1 to ensure full rank
+        A_full_rank = U @ torch.diag(S_full_rank) @ V.t()
+
+        # Assign the full-rank matrix to self.A
+        with torch.no_grad():
+            self._g_affine.copy_(A_full_rank)
+        
+        # Initialize B (n x d) with mean=0, std=0.1
+        B_init = torch.normal(mean=mean, std=std, size=(n, d))
+        
+        # Make sure B has rank min(n, d)
+        U_B, S_B, V_B = torch.svd(B_init)
+        rank_B = min(n, d)
+        S_B[rank_B:] = 0  # Zero out singular values beyond the desired rank
+        B_rank_adjusted = U_B @ torch.diag(S_B) @ V_B.t()
+        
+        # Assign the rank-adjusted matrix to self.B
+        with torch.no_grad():
+            self._u_affine.copy_(B_rank_adjusted)
 
     def forward(self, g0):
         '''
         perform mpc with current parameters given the initial x0
         '''
-        breakpoint()
+        # breakpoint()
         K, k, V, v = self._retrieve_riccati_solution()
         u = -self._batch_mv(K[0], g0) + k[0]  # apply the first control as mpc
         return u
@@ -222,7 +257,7 @@ class KoopmanLQR(nn.Module):
         B_trans = B.transpose(-2,-1)
 
         V[-1] = Q  # initialization for backpropagation
-        breakpoint()
+        # breakpoint()
         if goals is not None:
             v[-1] = self._batch_mv(Q, goals[:, -1, :])
             for i in reversed(range(T)):

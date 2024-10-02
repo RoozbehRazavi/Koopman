@@ -1,18 +1,18 @@
-seed: 2024
+seed: 30
 domain_name: "cartpole"
 task_name: "swingup"
-work_dir: "/kpmlilat/tests/test_embed_lqr_rl/tmp_paper/cartpole"
+work_dir: "./saved/tmp_paper/cartpole"
 save_video: True
 save_tb: True
 save_model: True
 save_buffer: False
 log_interval: 100
-device: "cuda:1"
+device: "cuda:0"
 env:
   pre_transform_image_size: 100
   action_repeat: 4
   frame_stack: 3
-  image_size: 84
+  image_size: 64
   replay_buffer_capacity: 100000
   encoder_type: "pixel"
 agent: 
@@ -43,7 +43,7 @@ train:
   num_train_steps: 500000
   batch_size: 128
 eval:
-  eval_freq: 50000
+  eval_freq: 2_000
   num_eval_episodes: 10
 koopman:
   koopman_size:                 0
@@ -56,7 +56,7 @@ koopman:
   koopman_fit_mat_reg_coeff:    0
   koopman_recons_coeff:         0 
   koopman_nonnn_lr:             0
-  koopman_goal_image_path:      "/kpmlilat/tests/test_embed_lqr_rl/goal_images/cartpole/goal_obs.pkl"
+  koopman_goal_image_path:      ""
   koopman_update_freq:          1
 
 
