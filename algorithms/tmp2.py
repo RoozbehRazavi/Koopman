@@ -474,6 +474,7 @@ class FixLenWrapper(gym.Wrapper):
                 # Compute the quadratic reward
                 reward = - (k_velocity * (s_forward_velocity - V_desired) ** 2) \
                         - (k_action * np.sum(action ** 2))
+                
                 return reward
             
             self.get_reward = get_reward
@@ -708,7 +709,8 @@ def eval_lqr(epoch, env, koopman_mapping, koopman_operator, cost_learning, koopm
 def main():
     EPOCH = 1_000
     EPISODE_COUNT_TRANING = 1000
-    KOOPMAN_MAPPING_FRE = 4 #32
+    KOOPMAN_MAPPING_FRE = 8 #32 next option is 8 after 4. What if we increase this freq as traning goes on?
+    KOOPMAN_MAPPING_FRE_DECAY = 2
     KOOPMAN_MAPPING_EPOCH = 1
     KOOPMAN_MAPPING_BATCH_SIZE = 32
     KOOPMAN_OPT_REG = 0.001
@@ -837,6 +839,9 @@ def main():
     koopman_mapping_optimizer = torch.optim.Adam(koopman_mapping.parameters(), lr=1e-3) #1e-4
     koopman_operator_optimizer = torch.optim.Adam(koopman_operator.parameters(), lr=1e-3)  
     cost_learning_optimizer = torch.optim.Adam(cost_learning.parameters(), lr=1e-3)
+    
+    # Learning rate scheduler for koopman_mapping_optimizer
+    koopman_mapping_scheduler = torch.optim.lr_scheduler.MultiStepLR(koopman_mapping_optimizer, milestones=[61,81, 101], gamma=0.05)
 
     states, actions, rewards, next_states = [], [], [], []
     hidden_state, c = None, None
@@ -850,6 +855,7 @@ def main():
     non_im_cost = torch.tensor([0.0], requires_grad=True)
     
     episode_couner = 0
+    # THIS usage of data is not optimal transition vs episode
     while episode_couner < EPOCH:
         #print(f'Epoch: {episode_couner}')
         if np.random.uniform(0, 1) < max(EPSILON, MIN_EPSILON):
@@ -899,7 +905,7 @@ def main():
                 koopman_operator_optimizer.step()
                 cost_learning_optimizer.step()
                 
-            if len(buffer.buffer) > KOOPMAN_MAPPING_BATCH_SIZE and episode_couner % KOOPMAN_MAPPING_FRE == 0:
+            if len(buffer.buffer) > KOOPMAN_MAPPING_BATCH_SIZE and episode_couner % int(KOOPMAN_MAPPING_FRE) == 0:
                 
                 #print('Training Update Mapping')
                 for j in range(KOOPMAN_MAPPING_EPOCH):
@@ -926,6 +932,7 @@ def main():
                         (koopman_mapping_loss + cost_loss + non_im_cost).backward()
                         koopman_mapping_optimizer.step()
                         koopman_mapping.update_momentum_encoder()
+                        KOOPMAN_MAPPING_FRE *= KOOPMAN_MAPPING_FRE_DECAY
             
         
             if episode_couner % EVAL_INTERVAL == 0:
@@ -942,6 +949,8 @@ def main():
                 torch.save(koopman_mapping.state_dict(), f'{save_dir}/koopman_mapping_{episode_couner}.pt')
                 torch.save(koopman_operator.state_dict(), f'{save_dir}/koopman_operator_{episode_couner}.pt')
                 torch.save(cost_learning.state_dict(), f'{save_dir}/cost_learning_{episode_couner}.pt')
+
+            koopman_mapping_scheduler.step()
 
 
 if __name__ == '__main__':
